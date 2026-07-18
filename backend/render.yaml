@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: opspilot-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    disk:
+      name: opspilot-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: CHAT_MODEL
+        value: llama-3.1-8b-instant
+      - key: EMBEDDING_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
+      - key: UPLOAD_DIR
+        value: data/uploads
+      - key: CHROMA_PERSIST_DIR
+        value: data/chroma_db
+      - key: HF_CACHE_DIR
+        value: data/hf_cache
+      - key: CHUNK_SIZE
+        value: "800"
+      - key: CHUNK_OVERLAP
+        value: "150"
+      - key: RETRIEVAL_TOP_K
+        value: "5"
+      - key: MAX_FILE_SIZE_MB
+        value: "50"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "*"
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO

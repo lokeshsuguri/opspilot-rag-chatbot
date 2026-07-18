@@ -1,0 +1,29 @@
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+/backend/venv/
+/backend/.venv/
+/backend/data/uploads/*
+!/backend/data/uploads/.gitkeep
+/backend/data/chroma_db/*
+!/backend/data/chroma_db/.gitkeep
+
+# --- Env files ---
+.env
+.env.local
+*.env
+
+# --- Node / frontend ---
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+npm-debug.log*
+
+# --- OS / editor ---
+.DS_Store
+.vscode/
+.vs/
+.idea/
+*.swp
