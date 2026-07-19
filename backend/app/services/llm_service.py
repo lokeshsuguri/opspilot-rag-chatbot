@@ -24,10 +24,10 @@ def _get_llm() -> ChatGroq:
 
     if _llm is None:
         _llm = ChatGroq(
-            model=settings.chat_model,
-            groq_api_key=settings.groq_api_key,
-            temperature=0.1,
-        )
+    model=settings.chat_model,
+    api_key=settings.groq_api_key,
+    temperature=0.1,
+)
 
     return _llm
 
