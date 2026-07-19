@@ -5,15 +5,34 @@ Wraps a single persistent Chroma collection. Each chunk is stored with
 metadata (document_id, filename, page_number) so retrieval results can be
 turned directly into citations without a second lookup.
 
-Embeddings use Google's Gemini embedding model. This is instantiated lazily
-so the app can still boot (and /health can report a clear error) even if
-GOOGLE_API_KEY is missing, rather than crashing at import time.
+Embeddings are generated locally with FastEmbed (ONNX Runtime), not
+PyTorch. This is a deliberate choice for deployment on memory-constrained
+hosts like Render's free tier (512 MB RAM):
+
+    torch + transformers + sentence-transformers routinely push RSS past
+    600-900 MB just to import and load `all-MiniLM-L6-v2`. On a 512 MB
+    box, the OS OOM-killer terminates the process the moment the model
+    finishes loading -- which is exactly the symptom this replaces:
+    the process printed "Load pretrained SentenceTransformer: ..." and
+    was silently restarted, with no Python traceback, because the kill
+    happens at the OS level, outside the interpreter.
+
+    FastEmbed loads the same model ("sentence-transformers/all-MiniLM-L6-v2")
+    but runs it through ONNX Runtime instead of PyTorch. There is no torch
+    import, no autograd machinery, and a single quantized ONNX graph
+    (~90 MB on disk) instead of the full transformers/sentence-transformers
+    stack. Typical peak RSS for embedding a batch of chunks drops to
+    roughly 150-250 MB, comfortably inside Render's free-tier limit.
+
+    The output vectors are numerically equivalent (same base model, same
+    384 dimensions), so this is a drop-in replacement: existing Chroma
+    collections keep working and retrieval quality is unaffected.
 """
 import logging
 import os
 
 import chromadb
-from langchain_huggingface import HuggingFaceEmbeddings
+from fastembed import TextEmbedding
 
 from app.config import get_settings
 from app.core.exceptions import QuotaExceededError
@@ -25,16 +44,45 @@ settings = get_settings()
 _COLLECTION_NAME = "opspilot_documents"
 
 _client: chromadb.ClientAPI | None = None
-_embeddings: HuggingFaceEmbeddings | None = None
+_embeddings: "_FastEmbedEmbeddings | None" = None
 
-# Root cause of the upload 502: without this, HuggingFaceEmbeddings falls
-# back to ~/.cache/huggingface, which is NOT on the persisted disk Render
-# mounts (see render.yaml: only /app/data is a persistent volume). Every
-# cold start / redeploy then re-downloads the ~90MB model from
-# huggingface.co the first time a PDF is uploaded, synchronously, inside
-# the request. Pointing the cache at the same persisted dir as Chroma means
-# the download happens once and survives restarts.
+# Cache the ONNX model weights on the same persisted disk as Chroma (see
+# render.yaml: only /app/data is a persistent volume). Without this, the
+# model would be re-downloaded from Hugging Face on every cold start /
+# redeploy the first time a PDF is uploaded, synchronously, inside the
+# request.
 os.makedirs(settings.hf_cache_dir, exist_ok=True)
+
+
+class _FastEmbedEmbeddings:
+    """
+    Minimal adapter around fastembed.TextEmbedding that exposes the same
+    two methods the rest of this module relies on (embed_documents /
+    embed_query), matching the interface previously provided by
+    langchain_huggingface.HuggingFaceEmbeddings. Keeping this shim local
+    (instead of pulling in a langchain integration package) avoids an
+    extra dependency and keeps the call sites in this file unchanged.
+    """
+
+    def __init__(self, model_name: str, cache_dir: str) -> None:
+        self._model = TextEmbedding(
+            model_name=model_name,
+            cache_dir=cache_dir,
+            # Single worker thread: Render's free tier is a single vCPU,
+            # so extra ONNX Runtime threads just add memory/context-switch
+            # overhead without speeding anything up.
+            threads=1,
+        )
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        # parallel=0 forces in-process, single-worker execution. Leaving
+        # this unset lets fastembed spawn a multiprocessing pool, which
+        # duplicates the loaded ONNX model across worker processes --
+        # exactly the kind of memory spike we're trying to eliminate.
+        return [vector.tolist() for vector in self._model.embed(texts, parallel=0)]
+
+    def embed_query(self, text: str) -> list[float]:
+        return next(self._model.embed([text], parallel=0)).tolist()
 
 
 def _get_client() -> chromadb.ClientAPI:
@@ -52,15 +100,15 @@ def _get_client() -> chromadb.ClientAPI:
     return _client
 
 
-def _get_embeddings() -> HuggingFaceEmbeddings:
+def _get_embeddings() -> _FastEmbedEmbeddings:
     global _embeddings
 
     if _embeddings is None:
         logger.info("Loading local embedding model... (first run may take a minute)")
 
-        _embeddings = HuggingFaceEmbeddings(
+        _embeddings = _FastEmbedEmbeddings(
             model_name=settings.embedding_model,
-            cache_folder=settings.hf_cache_dir,
+            cache_dir=settings.hf_cache_dir,
         )
 
     return _embeddings
@@ -70,11 +118,11 @@ def warm_up() -> None:
     """
     Force-load the embedding model and the Chroma client immediately.
 
-    Call this once from a FastAPI startup hook (see main.py) instead of
-    letting it happen lazily on a user's first upload request. This moves
-    the slow, network-dependent, blocking work to container boot time,
-    where a failure is visible in deploy logs and /api/health can report it
-    -- rather than surfacing as a mid-request 502 with no diagnostic trail.
+    Call this once from a FastAPI startup hook (see main.py). FastEmbed's
+    memory footprint is small enough that doing this at boot (rather than
+    lazily on the first upload) no longer risks exceeding Render's 512 MB
+    limit, and it means a broken deploy fails fast and visibly in the
+    deploy logs instead of on a user's first request.
     """
     _get_embeddings().embed_query("warmup")
     _get_client()

@@ -11,6 +11,7 @@ __pycache__/
 !/backend/data/uploads/.gitkeep
 /backend/data/chroma_db/*
 !/backend/data/chroma_db/.gitkeep
+/backend/data/hf_cache/
 
 # --- Env files ---
 .env
